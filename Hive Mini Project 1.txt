@@ -1,0 +1,161 @@
+Loaded the data into local using WinSCP
+Move the files into hdfs:
+hdfs dfs -copyFromLocal /home/cloudera/AgentLogingReport.csv /tmp
+hdfs dfs -copyFromLocal /home/cloudera/AgentPerformance.csv /tmp
+
+1. Create a schema based on the given dataset
+
+create table AgentLogingReport(
+SLNo int,
+Agent string,
+Date string,
+LoginTime string,
+LogoutTime string,
+Duration string
+)
+row format delimited
+fields terminated by ','
+tblproperties ("skip.header.line.count" = "1");
+
+create table AgentPerformance(
+SLNo int,
+Date string,
+AgentName string,
+TotalChats int,
+AverageResponseTime string,
+AverageResolutionTime string,
+AverageRating double,
+TotalFeedback int
+)
+row format delimited
+fields terminated by ','
+tblproperties ("skip.header.line.count" = "1");
+
+
+2. Dump the data inside the hdfs in the given schema location.
+LOAD DATA INPATH '/tmp/AgentPerformance.csv' INTO TABLE AgentPerformance;
+LOAD DATA INPATH '/tmp/AgentLogingReport.csv' INTO TABLE AgentLogingReport;
+ 
+3. List of all agents' names. 
+SELECT DISTINCT Agent from AgentLogingReport;
+
+4. Find out agent average rating.
+SELECT AgentName, AverageRating FROM AgentPerformance;
+
+5. Total working days for each agents 
+Select agent, count(distinct date) as totalworkingdays from AgentLogingReport group by agent;
+
+6. Total query that each agent have taken 
+Select agentname, sum(totalchats) as total_queries from AgentPerformance group by agentname;
+
+7. Total Feedback that each agent have received 
+Select agentname, sum(totalfeedback) as total_queries from AgentPerformance group by agentname;
+
+8. Agent name who have average rating between 3.5 to 4 
+Select agentname from AgentPerformance where averagerating >= 3.5 and averagerating <=4;
+
+9. Agent name who have rating less than 3.5 
+Select agentname from AgentPerformance where averagerating >= 3.5;
+
+10. Agent name who have rating more than 4.5 
+Select agentname from AgentPerformance where averagerating <=4.5;
+
+11. How many feedback agents have received more than 4.5 average rating
+Select agentname, sum(totalfeedback) as totalfeedback from AgentPerformance where averagerating <=4.5 group by agentname;
+
+12. average weekly response time for each agent
+
+code in transform_agentperformance.py
+import sys
+for line in sys.stdin:
+	line = line.ip("\n\r")
+	agentname, date, response, resolution = line.split("\t")
+	response = response.split(":")
+	responseHrs = response[0]
+	responseMin = response[1]
+	responseSec = response[2]
+	
+	resolution = resolution.split(":")
+	resolutionHrs = resolution[0]
+	resolutionMin = resolution[1]
+	resolutionSec = resolution[2]
+	result = '\t'.join([agentname, date, (responseHrs), (responseMin), (responseSec), (resolutionHrs), (resolutionMin), (resolutionSec)])
+	
+	print(result)
+	
+with temp_cte as(
+SELECT *, WEEKOFYEAR(concat_ws('-', split(date, '/')[2], split(date, '/')[0], split(date, '/')[1])) as weekNumber From(
+SELECT transform(agentname, date, averageresponsetime, averageresolutiontime) using 'python transform_agentperformance.py' as (agentname string, date string, responseHrs int, responseMin int, responseSec int, resolutionHrs int, resolutionMin int, resolutionSec int) FROM agentperformance))
+
+SELECT agentname, concat_ws(":", avg(responseHrs), avg(responseMin), avg(responseSec)) as weeklyAvgResponseTime, concat_ws(":", avg(resolutionHrs), avg(resolutionMin), avg(resolutionSec)) as weeklyAvgResolutionTime FROM temp_cte group by agentname, weekNumber
+
+
+13. average weekly resolution time for each agents 
+Done in above question
+
+14. Find the number of chat on which they have received a feedback 
+SELECT agentname, sum(TotalFeedback) as totalfeedback FROM AgentPerformance where TotalFeedback>0 group by agentname;
+
+
+15. Total contribution hour for each and every agents weekly basis
+code in transform_agentloging.py
+import sys
+for line in sys.stdin:
+        line = line.strip("\n\r")
+        slno, date, duration = line.split("\t")
+        date = date.split("-")
+        day = date[0]
+        month = date[1]
+        monthDict = {'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04', 'May': '05', 'Jun': '06', 'Jul': '07',
+        'Aug': '02', 'Sep': '03', 'Oct': '04', 'Nov': '05', 'Dec': '06'
+        }
+        year = "20" + date[2]
+        finalDate = year + "-" + monthDict[month] + "-" + year
+
+        hrs, min, sec = duration.split(":")
+        hrs = int(hrs)
+        min = int(min)
+        sec = int(sec)
+
+        workingHrs = hrs + (min/60) + (sec/3600)
+
+        result = '\t'.join([str(slno), str(finalDate),workingHrs])
+        print(result)
+		
+-- creating a transformed table
+create table AgentLogingReport_transformed as Select transform(slno, date, duration) using 'python transform_agentloging.py' as (slno string, date string, workingHrs int) from AgentLogingReport
+
+-- creating final table by joining
+create table AgentLogingReport_final as Select T1.slno, T1.agent, T2.date, T1.logintime, T1.logouttime, T2.workingHrs from AgentLogingReport as T1 inner join AgentLogingReport_transformed as T2 on T1.slno = T2.slno;
+
+-- finding weekly contribution
+Select From(
+SELECT agent, weekNumber, AVG(workingHrs) as weeklyContribution WEEKOFYEAR(concat_ws('-', split(date, '/')[2], split(date, '/')[0], split(date, '/')[1])) as weekNumber, workingHrs from agentlogingreport_final) group by agent, weekNumber
+
+16. Perform inner join, left join and right join based on the agent column and after joining the table export that data into your local system.
+
+Insert Overwrite local directory '/tmp'
+Row format delimited
+Fields terminated by ','
+Select * From agentlogingreport_final T1 Left Join agentperformance T2 ON T1.agent = T2.agentname
+
+
+Insert Overwrite local directory '/tmp'
+Row format delimited
+Fields terminated by ','
+Select * From agentlogingreport_final T1 Right Join agentperformance T2 ON T1.agent = T2.agentname
+
+
+Insert Overwrite local directory '/tmp'
+Row format delimited
+Fields terminated by ','
+Select * From agentlogingreport_final T1 Inner Join agentperformance T2 ON T1.agent = T2.agentname
+
+17. Perform partitioning on top of the agent column and then on top of that perform bucketing for each partitioning.
+
+
+Create Table agentlogingreport_part_buck(slno int, date string, logintime string, logouttime string, workinghrs int)
+partitioned by(agent string) clustered by (slno) sorted by (slno) into 3 buckets;
+
+Insert overwrite table agentlogingreport_part_buck partition(agent) select slno, date, logintime, logouttime, workinghrs, agent from agentlogingreport_final
+
